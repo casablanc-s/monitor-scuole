@@ -1,41 +1,257 @@
-name: Monitor Bandi Teatrali Scuole Torino
+"""
+Monitor Albi Online Scuole - Torino e Provincia
+Cerca bandi per laboratori teatrali negli albi online delle scuole.
+Versione 2: usa feed RSS dove disponibile, scraping diretto dove non c'è RSS.
+"""
 
-on:
-  schedule:
-    # Esegue ogni mattina alle 8:00 ora italiana (7:00 UTC)
-    - cron: '0 7 * * *'
-  workflow_dispatch:  # permette anche esecuzione manuale
+import urllib.request
+import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
+import json
+import os
+import re
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 
-jobs:
-  monitor:
-    runs-on: ubuntu-latest
+# ── CONFIGURAZIONE ──────────────────────────────────────────────────────────
+EMAIL_MITTENTE     = os.environ.get("EMAIL_MITTENTE", "")
+EMAIL_PASSWORD     = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO", "")
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+PAROLE_CHIAVE = [
+    "teatro", "teatrale", "laboratorio teatr",
+    "esperto teatro", "animazione teatrale",
+    "drammatizzazione", "recitazione", "esperto esterno teatro",
+    "attività teatrale", "progetto teatro"
+]
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+STORICO_FILE = "bandi_notificati.json"
 
-      - name: Ripristina storico bandi notificati
-        uses: actions/cache@v4
-        with:
-          path: bandi_notificati.json
-          key: storico-bandi-${{ runner.os }}
-          restore-keys: storico-bandi-
+# Path albo online più comuni nei siti scolastici italiani
+PATH_ALBO = [
+    "/albo-online/",
+    "/albo-pretorio/",
+    "/albo/",
+    "/category/albo-online/",
+    "/category/albo/",
+    "/avvisi/",
+    "/bandi/",
+    "/amministrazione-trasparente/bandi-di-gara-e-contratti/",
+]
 
-      - name: Esegui monitoraggio
-        env:
-          EMAIL_MITTENTE: ${{ secrets.EMAIL_MITTENTE }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
-        run: python monitor_scuole.py
+# Path feed RSS più comuni
+PATH_RSS = [
+    "/feed/",
+    "/feed",
+    "/?feed=rss2",
+    "/albo-online/feed/",
+    "/albo-pretorio/feed/",
+    "/category/albo-online/feed/",
+]
+# ────────────────────────────────────────────────────────────────────────────
 
-      - name: Salva storico aggiornato
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: bandi_notificati.json
-          key: storico-bandi-${{ runner.os }}-${{ github.run_id }}
+
+def carica_storico():
+    if os.path.exists(STORICO_FILE):
+        with open(STORICO_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def salva_storico(storico):
+    with open(STORICO_FILE, "w") as f:
+        json.dump(list(storico), f)
+
+
+def scarica_url(url, timeout=10):
+    """Scarica una URL e restituisce il contenuto come stringa. None se errore."""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; ScuoleMonitor/2.0)"
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read().decode(charset, errors="replace")
+    except Exception:
+        return None
+
+
+def scarica_scuole_torino():
+    """
+    Scarica l'elenco delle scuole di Torino e provincia dalla banca dati MIUR.
+    """
+    url = (
+        "https://dati.istruzione.it/opendata/opendata/catalogo/elements1/"
+        "SCUANAGRAFESTAT20242025.json"
+    )
+    print("Scarico elenco scuole MIUR...")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"Errore scaricamento MIUR: {e}")
+        return []
+
+    scuole = []
+    for item in data:
+        prov = item.get("PROVINCIA", "").upper()
+        sito = item.get("SITOWEBSCUOLA", "").strip()
+        nome = item.get("DENOMINAZIONESCUOLA", "").strip()
+        if prov == "TO" and sito and sito.startswith("http"):
+            scuole.append({"nome": nome, "sito": sito.rstrip("/")})
+
+    print(f"  → {len(scuole)} scuole trovate con sito web")
+    return scuole
+
+
+def contiene_parola_chiave(testo):
+    testo_lower = testo.lower()
+    return any(kw in testo_lower for kw in PAROLE_CHIAVE)
+
+
+def analizza_rss(contenuto):
+    """Analizza un feed RSS e restituisce lista di (titolo, link, data)."""
+    risultati = []
+    try:
+        root = ET.fromstring(contenuto)
+        for item in root.findall(".//item"):
+            titolo = item.findtext("title", "").strip()
+            link   = item.findtext("link", "").strip()
+            data   = item.findtext("pubDate", "").strip()
+            if titolo and link:
+                risultati.append((titolo, link, data))
+    except Exception:
+        pass
+    return risultati
+
+
+def estrai_link_da_html(html, base_url):
+    """
+    Estrae titoli e link da una pagina HTML dell'albo online.
+    Cerca tag <a> il cui testo contiene parole chiave teatrali.
+    """
+    risultati = []
+    pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+    for match in pattern.finditer(html):
+        href  = match.group(1).strip()
+        testo = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        if len(testo) < 5:
+            continue
+        if contiene_parola_chiave(testo):
+            if href.startswith("http"):
+                link_completo = href
+            else:
+                link_completo = urllib.parse.urljoin(base_url, href)
+            risultati.append((testo, link_completo, ""))
+    return risultati
+
+
+def monitora_scuola(scuola):
+    """
+    Monitora una scuola: prima prova RSS, poi scraping diretto.
+    Restituisce lista di (titolo, link, data) con parole chiave trovate.
+    """
+    sito = scuola["sito"]
+    trovati = []
+
+    # ── Tentativo 1: Feed RSS ──
+    for path in PATH_RSS:
+        url_feed = sito + path
+        contenuto = scarica_url(url_feed, timeout=8)
+        if contenuto and "<rss" in contenuto.lower():
+            articoli = analizza_rss(contenuto)
+            if articoli:
+                for titolo, link, data in articoli:
+                    if contiene_parola_chiave(titolo):
+                        trovati.append((titolo, link, data))
+                return trovati
+
+    # ── Tentativo 2: Scraping diretto pagina albo ──
+    for path in PATH_ALBO:
+        url_albo = sito + path
+        html = scarica_url(url_albo, timeout=8)
+        if html and len(html) > 500:
+            articoli = estrai_link_da_html(html, url_albo)
+            if articoli:
+                trovati.extend(articoli)
+                return trovati
+
+    return trovati
+
+
+def invia_email(bandi_trovati):
+    if not EMAIL_MITTENTE or not EMAIL_PASSWORD or not EMAIL_DESTINATARIO:
+        print("⚠️  Credenziali email non configurate — stampo i risultati:")
+        for scuola, titolo, link, data in bandi_trovati:
+            print(f"  [{scuola}] {titolo}\n  {link}\n  {data}\n")
+        return
+
+    corpo_html = """
+    <h2 style='color:#333'>🎭 Nuovi bandi laboratori teatrali</h2>
+    <p style='color:#666'>Scuole di Torino e provincia — """ + datetime.today().strftime('%d/%m/%Y') + """</p>
+    <hr>
+    <ul style='line-height:2'>
+    """
+    for scuola, titolo, link, data in bandi_trovati:
+        data_str = f"<br><small style='color:#999'>{data}</small>" if data else ""
+        corpo_html += f"""
+        <li>
+            <b style='color:#444'>{scuola}</b><br>
+            <a href='{link}' style='color:#1a73e8'>{titolo}</a>
+            {data_str}
+        </li>
+        """
+    corpo_html += "</ul><hr><p style='color:#999;font-size:12px'>Monitor automatico scuole Torino</p>"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🎭 {len(bandi_trovati)} nuovi bandi teatrali scuole TO — {datetime.today().strftime('%d/%m/%Y')}"
+    msg["From"]    = EMAIL_MITTENTE
+    msg["To"]      = EMAIL_DESTINATARIO
+    msg.attach(MIMEText(corpo_html, "html"))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(EMAIL_MITTENTE, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_MITTENTE, EMAIL_DESTINATARIO, msg.as_string())
+    print(f"✅ Email inviata con {len(bandi_trovati)} bandi")
+
+
+def main():
+    print(f"\n{'='*50}")
+    print(f"Avvio monitoraggio v2 — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    print(f"{'='*50}\n")
+
+    storico = carica_storico()
+    scuole  = scarica_scuole_torino()
+
+    if not scuole:
+        print("Nessuna scuola trovata. Uscita.")
+        return
+
+    bandi_nuovi = []
+    for i, scuola in enumerate(scuole, 1):
+        if i % 50 == 0:
+            print(f"  Controllo scuola {i}/{len(scuole)}...")
+
+        trovati = monitora_scuola(scuola)
+        for titolo, link, data in trovati:
+            if link not in storico:
+                bandi_nuovi.append((scuola["nome"], titolo, link, data))
+                storico.add(link)
+
+    salva_storico(storico)
+
+    print(f"\nRisultato: {len(bandi_nuovi)} nuovi bandi trovati")
+    if bandi_nuovi:
+        invia_email(bandi_nuovi)
+    else:
+        print("Nessun nuovo bando da segnalare oggi.")
+
+
+if __name__ == "__main__":
+    main()
