@@ -1,0 +1,41 @@
+name: Monitor Bandi Teatrali Scuole Torino
+
+on:
+  schedule:
+    # Esegue ogni mattina alle 8:00 ora italiana (7:00 UTC)
+    - cron: '0 7 * * *'
+  workflow_dispatch:  # permette anche esecuzione manuale
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Ripristina storico bandi notificati
+        uses: actions/cache@v4
+        with:
+          path: bandi_notificati.json
+          key: storico-bandi-${{ runner.os }}
+          restore-keys: storico-bandi-
+
+      - name: Esegui monitoraggio
+        env:
+          EMAIL_MITTENTE: ${{ secrets.EMAIL_MITTENTE }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
+        run: python monitor_scuole.py
+
+      - name: Salva storico aggiornato
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: bandi_notificati.json
+          key: storico-bandi-${{ runner.os }}-${{ github.run_id }}
