@@ -1,4 +1,4 @@
-"""
+
 Monitor Albi Online Scuole - Torino e Provincia
 Cerca bandi per laboratori teatrali negli albi online delle scuole.
 Versione 2: usa feed RSS dove disponibile, scraping diretto dove non c'è RSS.
