@@ -1,9 +1,9 @@
 name: Monitor Bandi Teatrali Scuole Torino
 
 on:
-  workflow_dispatch: # Questo serve per farlo partire a mano
+  workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *' # Gira ogni mattina alle 8:00
+    - cron: '0 8 * * *'
 
 jobs:
   monitor:
@@ -22,7 +22,6 @@ jobs:
 
       - name: Esegui monitoraggio
         env:
-          # Qui diciamo a GitHub di passare i tuoi Secrets allo script Python
           EMAIL_MITTENTE: ${{ secrets.EMAIL_MITTENTE }}
           EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
