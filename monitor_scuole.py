@@ -34,7 +34,7 @@ def invia_mail(testo_mail):
 def monitora_ust_torino():
     """Controlla direttamente il sito del Provveditorato di Torino"""
     print("Inizio scansione UST Torino...")
-    url = "https://www.usttorino.it/avvisi/"
+    url = "http://www.istruzionepiemonte.it/torino/avvisi/"
     headers = {'User-Agent': 'Mozilla/5.0'}
     trovati = []
     try:
