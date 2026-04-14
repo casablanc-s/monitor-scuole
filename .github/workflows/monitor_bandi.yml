@@ -1,32 +1,29 @@
 name: Monitor Bandi Teatrali Scuole Torino
 
 on:
+  workflow_dispatch: # Questo serve per farlo partire a mano
   schedule:
-    - cron: '0 7 * * *'
-  workflow_dispatch:
+    - cron: '0 8 * * *' # Gira ogni mattina alle 8:00
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout del codice
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: Ripristina storico
-        uses: actions/cache@v4
-        with:
-          path: bandi_notificati.json
-          key: storico-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: storico-${{ runner.os }}-
+      - name: Installa librerie
+        run: pip install requests beautifulsoup4
 
       - name: Esegui monitoraggio
         env:
+          # Qui diciamo a GitHub di passare i tuoi Secrets allo script Python
           EMAIL_MITTENTE: ${{ secrets.EMAIL_MITTENTE }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: python monitor_scuole.py
