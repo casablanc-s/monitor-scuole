@@ -4,7 +4,6 @@ from datetime import datetime
 import urllib.parse
 import smtplib
 import os
-import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -12,15 +11,14 @@ def invia_mail(testo_mail):
     mittente = os.getenv("EMAIL_MITTENTE")
     password = os.getenv("EMAIL_PASSWORD")
     destinatario = os.getenv("EMAIL_DESTINATARIO")
-
     if not mittente or not password:
-        print("Errore: Credenziali non trovate!")
+        print("Errore: Secrets non configurati correttamente.")
         return
 
     msg = MIMEMultipart()
     msg['From'] = mittente
     msg['To'] = destinatario
-    msg['Subject'] = f"🎭 MONITORAGGIO BANDI: Novità Torino - {datetime.now().strftime('%d/%m')}"
+    msg['Subject'] = f"🎭 BANDI ESTATE/PNRR TORINO: Aggiornamento {datetime.now().strftime('%d/%m')}"
     msg.attach(MIMEText(testo_mail, 'plain'))
 
     try:
@@ -33,63 +31,59 @@ def invia_mail(testo_mail):
     except Exception as e:
         print(f"❌ Errore invio mail: {e}")
 
-def cerca_bandi():
-    print(f"=== AVVIO RICERCA POTENZIATA (PNRR, AGENDA NORD, PIANO ESTATE) ===")
-    
-    # Query avanzata che include i grandi progetti "ombrello"
-    termini_progetto = '(PNRR OR "Agenda Nord" OR "Piano Estate" OR "FSE" OR "PON" OR "esperto esterno")'
-    termini_teatro = '(teatro OR teatrale OR recitazione OR drammatizzazione OR "espressione corporea")'
-    query = f'site:.edu.it "torino" {termini_progetto} {termini_teatro}'
-    
-    query_enc = urllib.parse.quote(query)
-    url = f"https://html.duckduckgo.com/html/?q={query_enc}"
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
+def monitora_ust_torino():
+    """Controlla direttamente il sito del Provveditorato di Torino"""
+    print("Inizio scansione UST Torino...")
+    url = "https://www.usttorino.it/avvisi/"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    trovati = []
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        risultati = soup.find_all('div', class_='result')
-        
-        trovati_diretti = []
-        trovati_potenziali = []
-        anni_validi = ["2024", "2025", "2026"]
-        
-        for res in risultati:
-            link = res.find('a', class_='result__a')
-            if not link: continue
-            
-            titolo = link.get_text()
-            url_bando = link['href']
-            testo_anteprima = res.get_text().lower()
-            
-            # Verifichiamo se è roba recente
-            if any(anno in titolo or anno in testo_anteprima for anno in anni_validi):
-                # Se leggiamo esplicitamente "teatro" è un colpo sicuro
-                if any(t in testo_anteprima for t in ["teatro", "teatrale", "recitazione"]):
-                    trovati_diretti.append(f"🔴 BANDO TEATRO ESPLICITO: {titolo}\nLINK: {url_bando}\n")
-                else:
-                    # Se è un grande bando ma la parola teatro non si legge nell'anteprima
-                    trovati_potenziali.append(f"🟡 PROGETTO QUADRO (Controllare moduli interni): {titolo}\nLINK: {url_bando}\n")
-
-        if trovati_diretti or trovati_potenziali:
-            report = "Ciao! Ecco i risultati della scansione odierna su Torino e provincia:\n\n"
-            
-            if trovati_diretti:
-                report += "--- BANDI CON RIFERIMENTO DIRETTO ---\n" + "\n".join(trovati_diretti) + "\n"
-            
-            if trovati_potenziali:
-                report += "--- PROGETTI AMPI (PNRR/AGENDA NORD) DA VERIFICARE ---\n"
-                report += "Nota: questi bandi potrebbero contenere moduli di teatro all'interno.\n\n"
-                report += "\n".join(trovati_potenziali)
-            
-            print(report)
-            invia_mail(report)
-        else:
-            print("Nessun bando o progetto quadro trovato oggi.")
-
+        res = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        for link in soup.find_all('a'):
+            testo = link.get_text().lower()
+            # Cerca parole chiave nei titoli degli avvisi dell'UST
+            if any(k in testo for k in ["teatro", "teatrale", "piano estate", "agenda nord", "esperto"]):
+                trovati.append(f"🔴 SITO UST TORINO: {link.get_text().strip()}\nLINK: {link['href']}\n")
     except Exception as e:
-        print(f"Errore durante la ricerca: {e}")
+        print(f"Errore UST Torino: {e}")
+    return trovati
+
+def cerca_web_massivo():
+    """Ricerca PNRR, Agenda Nord e Piano Estate su tutti i siti .edu.it di Torino"""
+    print("Inizio ricerca massiva su siti scolastici (PNRR/Agenda Nord/Estate)...")
+    # Query potente che incrocia i grandi progetti con il teatro a Torino
+    query = 'site:.edu.it "torino" ("piano estate" OR "agenda nord" OR PNRR OR bando OR avviso) (teatro OR teatrale OR recitazione)'
+    url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    trovati = []
+    try:
+        res = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        for result in soup.find_all('div', class_='result'):
+            t = result.get_text().lower()
+            # Filtro per anni recenti per evitare vecchi bandi
+            if any(anno in t for anno in ["2024", "2025", "2026"]):
+                link = result.find('a', class_='result__a')
+                if link:
+                    trovati.append(f"🟡 DAL WEB (Scuola/PNRR): {link.get_text()}\nLINK: {link['href']}\n")
+    except Exception as e:
+        print(f"Errore ricerca web: {e}")
+    return trovati
 
 if __name__ == "__main__":
-    cerca_bandi()
+    # Uniamo i risultati di entrambe le ricerche
+    risultati_totali = monitora_ust_torino() + cerca_web_massivo()
+    
+    if risultati_totali:
+        # Elimina eventuali duplicati
+        risultati_unici = list(set(risultati_totali))
+        report = f"REPORT BANDI TEATRO TORINO - {datetime.now().strftime('%d/%m/%Y')}\n"
+        report += "Ho trovato i seguenti avvisi che potrebbero contenere laboratori di teatro:\n\n"
+        report += "\n".join(risultati_unici)
+        report += "\n\nNota: Controlla sempre i moduli interni se il bando è generico (PNRR/Estate)."
+        
+        print(report)
+        invia_mail(report)
+    else:
+        print("Nessun nuovo bando o progetto trovato oggi.")
